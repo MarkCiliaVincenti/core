@@ -353,6 +353,11 @@ public static class Settings
     public static string MaskinportenUrl => GetSetting("MaskinportenUrl");
 
     /// <summary>
+    /// Gets the Base URL to an auxiliary Maskinporten environment
+    /// </summary>
+    public static string MaskinportenAuxUrl => GetSetting("MaskinportenAuxUrl");
+
+    /// <summary>
     /// Gets setting for whether or not to use altinn servers in test mode (for profiling and problem solving)
     /// </summary>
     public static bool UseAltinnTestServers => bool.Parse(GetSetting("UseAltinnTestServers"));
@@ -364,9 +369,16 @@ public static class Settings
     /// </summary>
     public static string MaskinportenWellknownUrl => GetSetting("MaskinportenWellknownUrl");
 
+    /// <summary>
+    /// Gets the url to the wellknown endpoint for the auxiliary Maskinporten env
+    /// </summary>
+    public static string MaskinportenAuxWellknownUrl => GetSetting("MaskinportenAuxWellknownUrl");
+
     public static string AltinnWellknownUrl => GetSetting("AltinnWellknownUrl");
 
     public const int MaxReferenceLength = 50;
+
+    public static int DefaultHarvestTaskCancellation = 35;
 
     private static string GetSetting(string settingKey)
     {

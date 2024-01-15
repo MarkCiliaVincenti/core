@@ -72,33 +72,47 @@ namespace Dan.Core
 
             var authorizationRequest = GetAuthorizationRequest(accreditation);
             await _authorizationRequestValidatorService.Validate(authorizationRequest);
-
-            var evidence = await _evidenceHarvesterService.Harvest(evidenceCodeName, accreditation, 
-                _requestContextService.GetEvidenceHarvesterOptionsFromRequest());
-
+            var evidenceCodeForHarvest = accreditation.GetValidEvidenceCode(evidenceCodeName);
+            
             var response = req.CreateResponse(HttpStatusCode.OK);
-            if (req.HasQueryParam("envelope") && !req.GetBoolQueryParam("envelope"))
+            
+            if (evidenceCodeForHarvest.Values.Any(x => x.ValueType == EvidenceValueType.Binary))
             {
-                await response.SetUnenvelopedEvidenceValuesAsync(evidence.EvidenceValues);
+                // Binary content, "stream" response to client, This is not actually streaming, as 
+                // the HttpResponseData representation does not provide access to the actual HttpRequest. 
+                response.Headers.Add("Content-Type", "application/octet-stream");
+                var upstreamResponse = await _evidenceHarvesterService.HarvestStream(evidenceCodeName, accreditation,
+                    _requestContextService.GetEvidenceHarvesterOptionsFromRequest());
+
+                await upstreamResponse.CopyToAsync(response.Body);
             }
             else
             {
-                await response.SetEvidenceAsync(evidence);
+                var evidence = await _evidenceHarvesterService.Harvest(evidenceCodeName, accreditation,
+                    _requestContextService.GetEvidenceHarvesterOptionsFromRequest());
+
+                if (req.HasQueryParam("envelope") && !req.GetBoolQueryParam("envelope"))
+                {
+                    await response.SetUnenvelopedEvidenceValuesAsync(evidence.EvidenceValues,
+                        req.GetQueryParam(JmesPathTransfomer.QueryParameter));
+                }
+                else
+                {
+                    await response.SetEvidenceAsync(evidence);
+                }
             }
 
-            var evidenceCode = accreditation.GetValidEvidenceCode(evidenceCodeName);
-
-            if (_consentService.EvidenceCodeRequiresConsent(evidenceCode))
+            if (_consentService.EvidenceCodeRequiresConsent(evidenceCodeForHarvest))
             {
                 using (var t = _logger.Timer("consent-log-usage"))
                 {
                     _logger.LogInformation(
-                        "Start logging consent based harvest aid={accreditaionId} evidenceCode={evidenceCode}",
-                        accreditation.AccreditationId, evidenceCode.EvidenceCodeName);
-                    await LogConsentBasedHarvest(evidenceCode, accreditation);
+                        "Start logging consent based harvest aid={accreditationId} evidenceCode={evidenceCode}",
+                        accreditation.AccreditationId, evidenceCodeForHarvest.EvidenceCodeName);
+                    await LogConsentBasedHarvest(evidenceCodeForHarvest, accreditation);
                     _logger.LogInformation(
                         "Completed logging consent based harvest aid={accreditationId} evidenceCode={evidenceCode} elapsedMs={elapsedMs}",
-                        accreditation.AccreditationId, evidenceCode.EvidenceCodeName, t.ElapsedMilliseconds);
+                        accreditation.AccreditationId, evidenceCodeForHarvest.EvidenceCodeName, t.ElapsedMilliseconds);
                 }
             }
 
@@ -108,7 +122,7 @@ namespace Dan.Core
 
             await _accreditationRepository.UpdateAccreditationAsync(accreditation);
 
-            _logger.DanLog(accreditation, LogAction.DataRetrieved);
+            _logger.DanLog(accreditation, LogAction.DatasetRetrieved, evidenceCodeName);
 
             return response;
         }

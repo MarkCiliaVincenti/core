@@ -1,4 +1,5 @@
-﻿using Dan.Common.Enums;
+﻿using Dan.Common;
+using Dan.Common.Enums;
 using Dan.Common.Models;
 using Dan.Core.Extensions;
 using Dan.Core.Helpers;
@@ -10,20 +11,20 @@ namespace Dan.Core.Services;
 public class EvidenceStatusService : IEvidenceStatusService
 {
     private readonly IAvailableEvidenceCodesService _availableEvidenceCodesService;
-    private readonly IConsentService _consentService;
+    private readonly IAltinn3ConsentService _consentServiceA3;
     private readonly IRequestContextService _requestContextService;
     private readonly ILogger<EvidenceStatusService> _logger;
     private readonly IHttpClientFactory _clientFactory;
 
     public EvidenceStatusService(
-        IAvailableEvidenceCodesService availableEvidenceCodesService, 
-        IConsentService consentService,
+        IAvailableEvidenceCodesService availableEvidenceCodesService,
+        IAltinn3ConsentService consentServiceA3,
         IRequestContextService requestContextService,
-        IHttpClientFactory clientFactory, 
+        IHttpClientFactory clientFactory,
         ILoggerFactory loggerFactory)
     {
         _availableEvidenceCodesService = availableEvidenceCodesService;
-        _consentService = consentService;
+        _consentServiceA3 = consentServiceA3;
         _requestContextService = requestContextService;
         _logger = loggerFactory.CreateLogger<EvidenceStatusService>();
         _clientFactory = clientFactory;
@@ -41,9 +42,9 @@ public class EvidenceStatusService : IEvidenceStatusService
         {
             status = EvidenceStatusCode.Unavailable;
         }
-        else if (_consentService.EvidenceCodeRequiresConsent(evidenceCode))
+        else if (_consentServiceA3.EvidenceCodeRequiresConsent(evidenceCode))
         {
-            var consentStatus = await _consentService.Check(accreditation, onlyLocalChecks);
+            var consentStatus = await _consentServiceA3.Check(accreditation, onlyLocalChecks);
             status = MapConsentStatusToEvidenceStatusCode(consentStatus);
             isConsentRequest = true;
         }
@@ -88,7 +89,7 @@ public class EvidenceStatusService : IEvidenceStatusService
             _logger.LogInformation("Start get evidence list aid={accreditationId}", accreditation.AccreditationId);
             foreach (var code in accreditation.EvidenceCodes)
             {
-                list.Add(await GetEvidenceStatusAsync(accreditation, code, false));
+                list.Add(await GetEvidenceStatusAsync(accreditation, code, true));
             }
 
             _logger.LogInformation("Completed get evidence list aid={accreditationId} numevidence={numEvidence} evidence={evidence} elapsedMs={elapsedMs}", accreditation.AccreditationId,
@@ -124,7 +125,7 @@ public class EvidenceStatusService : IEvidenceStatusService
         // In case the evidence code has been move to a new source, we need to update the evidence code EvidenceSource
         // to reflect that of the availableEvidenceCode, so that requests are routed correctly
         evidenceCode.EvidenceSource = availableEvidenceCode.EvidenceSource;
-
+        evidenceCode.RequiredScopes = availableEvidenceCode.RequiredScopes;
         evidenceCode.AuthorizationRequirements = evidenceCode.AuthorizationRequirements.Where(
             x => x.AppliesToServiceContext.Count == 0 || x.AppliesToServiceContext.Contains(_requestContextService.ServiceContext.Name)).ToList();
 
@@ -146,7 +147,8 @@ public class EvidenceStatusService : IEvidenceStatusService
 
     private async Task<EvidenceStatusCode> GetAsynchronousEvidenceStatusCode(Accreditation accreditation, EvidenceCode evidenceCode)
     {
-        var url = evidenceCode.GetEvidenceSourceUrl();
+        var aliases = await _availableEvidenceCodesService.GetAliases();
+        var url = evidenceCode.GetEvidenceSourceUrl(aliases);
 
         var request = new HttpRequestMessage(HttpMethod.Post, url);
         request.Headers.TryAddWithoutValidation("Accept", "application/json");
@@ -167,7 +169,7 @@ public class EvidenceStatusService : IEvidenceStatusService
         };
 
         request.JsonContent(evidenceHarvesterRequest);
-        var client = _clientFactory.CreateClient("SafeHttpClient");
+        var client = _clientFactory.CreateClient(Constants.PluginHttpClient);
 
         return (await EvidenceSourceHelper.DoRequest<EvidenceStatusCode>(
             request,

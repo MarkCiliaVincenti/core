@@ -2,6 +2,8 @@
 
 namespace Dan.Common.Models;
 
+// Not our model, can add descriptions to fields on request
+#pragma warning disable 1591
 // ReSharper disable once InconsistentNaming
 public class EntityRegistryUnit
 {
@@ -48,6 +50,9 @@ public class EntityRegistryUnit
 
     [JsonProperty("overordnetEnhet", NullValueHandling = NullValueHandling.Ignore, Required = Required.DisallowNull)]
     public string? OverordnetEnhet { get; set; }
+    
+    [JsonProperty("underEnheter", NullValueHandling = NullValueHandling.Ignore, Required = Required.DisallowNull)]
+    public List<string>? Underenheter { get; set; }
 
     [JsonProperty("oppstartsdato", NullValueHandling = NullValueHandling.Ignore, Required = Required.DisallowNull)]
     [JsonConverter(typeof(DateFormatConverter), "yyyy-MM-dd")]
@@ -165,3 +170,4 @@ public class Organisasjonsform
     [JsonProperty("_links", Required = Required.Always)]
     public Links Links { get; set; } = null!;
 }
+#pragma warning restore 1591

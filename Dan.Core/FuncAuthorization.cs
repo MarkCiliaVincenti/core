@@ -17,26 +17,29 @@ namespace Dan.Core;
 public class FuncAuthorization
 {
     private readonly HttpClient _client;
-    private readonly IConsentService _consentService;
+    private readonly IAltinn3ConsentService _a3ConsentService;
     private readonly IAuthorizationRequestValidatorService _authorizationRequestValidatorService;
     private readonly IRequestContextService _requestContextService;
     private readonly IAccreditationRepository _accreditationRepository;
+    private readonly IAvailableEvidenceCodesService _availableEvidenceCodesService;
     private readonly ILogger<FuncAuthorization> _logger;
 
     public FuncAuthorization(
         ILoggerFactory loggerFactory,
         IHttpClientFactory httpClientFactory,
-        IConsentService consentService,
         IAuthorizationRequestValidatorService authorizationRequestValidatorService,
         IRequestContextService requestContextService,
-        IAccreditationRepository accreditationRepository)
+        IAccreditationRepository accreditationRepository,
+        IAvailableEvidenceCodesService availableEvidenceCodesService,
+        IAltinn3ConsentService a3ConsentService)
     {
         _logger = loggerFactory.CreateLogger<FuncAuthorization>();
         _client = httpClientFactory.CreateClient("SafeHttpClient");
-        _consentService = consentService;
         _authorizationRequestValidatorService = authorizationRequestValidatorService;
         _requestContextService = requestContextService;
         _accreditationRepository = accreditationRepository;
+        _availableEvidenceCodesService = availableEvidenceCodesService;
+        _a3ConsentService = a3ConsentService;
     }
 
     /// <summary>
@@ -90,7 +93,8 @@ public class FuncAuthorization
             using (var t = _logger.Timer($"{evidenceCode.EvidenceCodeName}-init"))
             {
                 _logger.LogInformation("Start init async evidenceCode={evidenceCode} aid={accreditationId}", evidenceCode.EvidenceCodeName, accreditation.AccreditationId);
-                await EvidenceSourceHelper.InitAsynchronousEvidenceCodeRequest(accreditation, evidenceCode, _client);
+                var aliases = await _availableEvidenceCodesService.GetAliases();
+                await EvidenceSourceHelper.InitAsynchronousEvidenceCodeRequest(accreditation, evidenceCode, _client, aliases);
                 _logger.LogInformation("Completed init async evidenceCode={evidenceCode} aid={accreditationId} elapsedMs={elapsedMs}", evidenceCode.EvidenceCodeName, accreditation.AccreditationId, t.ElapsedMilliseconds);
             }
         }
@@ -100,9 +104,14 @@ public class FuncAuthorization
         {
             using (var t = _logger.Timer("consent-init"))
             {
-                _logger.LogInformation("Start init consent aid={accreditationId}", accreditation.AccreditationId);
-                await _consentService.Initiate(accreditation, authRequest.SkipAltinnNotification);
-                _logger.LogInformation("Completed init consent aid={accreditationId} elapsedMs={elapsedMs}", accreditation.AccreditationId, t.ElapsedMilliseconds);
+                var consentRequirements = evidenceCodes.SelectMany(x => x.AuthorizationRequirements.Where(r => r is ConsentRequirement && !string.IsNullOrEmpty(((ConsentRequirement)r).AltinnResource)).ToList()).ToList();
+
+                if (consentRequirements.Any())
+                {
+                    _logger.LogInformation("Initiating Altinn3 consent for aid={accreditationId}", accreditation.AccreditationId);
+                    await _a3ConsentService.Initiate(accreditation, authRequest.SkipAltinnNotification);
+                    _logger.LogInformation("Completed initiating Altinn3 consent for aid={accreditationId} elapsedMs={elapsedMs}", accreditation.AccreditationId, t.ElapsedMilliseconds);
+                }
             }
         }
 

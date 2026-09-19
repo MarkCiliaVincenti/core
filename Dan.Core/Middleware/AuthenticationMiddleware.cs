@@ -9,6 +9,7 @@ using Dan.Core.Extensions;
 using Dan.Core.Helpers;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Middleware;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Protocols;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
@@ -20,13 +21,19 @@ public class AuthenticationMiddleware : IFunctionsWorkerMiddleware
     public const string AuthorizationHeader = "X-NADOBE-AUTHORIZATION";
     public const string AuthorizationHeaderLocal = "Authorization";
     public const string DefaultScope = "altinn:dataaltinnno";
+    public const string NewScopeRoot = "dan:";
 
     private static readonly object CmLockMaskinporten = new();
-    private static readonly object CmLockMaskinportenAux = new();
     private static readonly object CmLockAltinnPlatform = new();
     private static volatile ConfigurationManager<OpenIdConnectConfiguration>? _cmMaskinporten;
-    private static volatile ConfigurationManager<OpenIdConnectConfiguration>? _cmMaskinportenAux;
     private static volatile ConfigurationManager<OpenIdConnectConfiguration>? _cmAltinnPlatform;
+
+    private readonly ILogger<AuthenticationMiddleware> _logger;
+
+    public AuthenticationMiddleware(ILogger<AuthenticationMiddleware> logger)
+    {
+        _logger = logger;
+    }
 
     /// <summary>
     /// Gets or sets maskinporten ConfigManager
@@ -55,37 +62,6 @@ public class AuthenticationMiddleware : IFunctionsWorkerMiddleware
             lock (CmLockMaskinporten)
             {
                 _cmMaskinporten = value;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Gets or sets maskinporten aux env ConfigManager in order to support ver2 and test for a period of time
-    /// </summary>
-    public static ConfigurationManager<OpenIdConnectConfiguration> CmMaskinportenAux
-    {
-        get
-        {
-            if (_cmMaskinportenAux != null) return _cmMaskinportenAux;
-            lock (CmLockMaskinportenAux)
-            {
-                if (_cmMaskinportenAux == null)
-                {
-                    _cmMaskinportenAux = new ConfigurationManager<OpenIdConnectConfiguration>(
-                        Settings.MaskinportenAuxWellknownUrl,
-                        new OpenIdConnectConfigurationRetriever(),
-                        new HttpClient { Timeout = TimeSpan.FromMilliseconds(10000) });
-                }
-            }
-
-            return _cmMaskinportenAux;
-        }
-
-        set
-        {
-            lock (CmLockMaskinportenAux)
-            {
-                _cmMaskinportenAux = value;
             }
         }
     }
@@ -134,19 +110,18 @@ public class AuthenticationMiddleware : IFunctionsWorkerMiddleware
         }
 
         // Usually this header is set by APIM, but for local testing check Authorization header as well
-        if (!request.Headers.TryGetValues(AuthorizationHeader, out IEnumerable<string>? headerValues))
+        if (!request.Headers.TryGetValues(AuthorizationHeader, out var headerValues))
         {
             request.Headers.TryGetValues(AuthorizationHeaderLocal, out headerValues);
         }
 
         // check authorization header for bearer token
-        // Also check if certificate header is set (x-nadobe-cert) to prevent apim's MSI token from being attempted as auth when testing locally 
-        if (headerValues != null && (request.Headers.Get(Settings.CertificateHeader) == null))
+        if (headerValues != null)
         {
             var accessTokenJwt = headerValues.First();
             accessTokenJwt = Jwt.RemoveBearer(accessTokenJwt);
             var claimsPrincipal = await ValidateJwt(accessTokenJwt);
-            if (ValidateScopes(claimsPrincipal, DefaultScope))
+            if (ValidateScopes(claimsPrincipal))
             {
                 orgNumber = claimsPrincipal.GetOrganizationNumberClaim();
                 scopes = claimsPrincipal.GetScopes()!.ToList();
@@ -158,39 +133,9 @@ public class AuthenticationMiddleware : IFunctionsWorkerMiddleware
 
             context.Items.Add(Constants.ACCESS_TOKEN, accessTokenJwt);
         }
-        //check for certificate header
         else
         {
-            var header = Settings.CertificateHeader;
-            var certificate = request.Headers.Get(header);
-
-            if (!string.IsNullOrEmpty(certificate))
-            {
-                X509Certificate2 suppliedCertificate;
-                try
-                {
-                    suppliedCertificate =
-                        new X509Certificate2(Encoding.UTF8.GetBytes(certificate));
-                }
-                catch (Exception e)
-                {
-                    throw new InvalidCertificateException("Unable to parse supplied certificate: " + e.Message);
-                }
-
-                try
-                {
-                    orgNumber = X509CertificateHelper.GetValidOrgNumberFromCertificate(suppliedCertificate);
-                }
-                catch (Exception e)
-                {
-                    throw new InvalidCertificateException("Unable to parse organization number from certificate", e);
-                }
-            }
-            // No token or certificate found 
-            else
-            {
-                throw new MissingAuthenticationException("No authentication method supplied");
-            }
+            throw new MissingAuthenticationException("No authentication method supplied");
         }
 
         context.Items.Add(Constants.AUTHENTICATED_ORGNO, orgNumber);
@@ -204,27 +149,35 @@ public class AuthenticationMiddleware : IFunctionsWorkerMiddleware
         var tokenHandler = new JwtSecurityTokenHandler();
         var jwt = tokenHandler.ReadJwtToken(token);
 
-        OpenIdConnectConfiguration discoveryDocument;
-        if (jwt.Issuer == Settings.MaskinportenUrl)
-        {
-            discoveryDocument = await CmMaskinporten.GetConfigurationAsync();
-        } else if (!string.IsNullOrEmpty(Settings.MaskinportenAuxUrl) && jwt.Issuer == Settings.MaskinportenAuxUrl)
-        {
-            discoveryDocument = await CmMaskinportenAux.GetConfigurationAsync();
-        }
-        else
-        {
-            discoveryDocument = await CmAltinnPlatform.GetConfigurationAsync();
-        }
+        // Resolve the token against the trusted OIDC providers. Each discovery document is loaded
+        // independently and only the document advertising the token's own issuer is used, so the token
+        // can only ever be validated against the signing keys of its own issuer (no cross-issuer fallback).
+        var (discoveryDocument, discoveryUnavailable) = await ResolveIssuerConfiguration(jwt.Issuer);
 
-        ICollection<SecurityKey> signingKeys = discoveryDocument.SigningKeys;
+        if (discoveryDocument == null)
+        {
+            if (discoveryUnavailable)
+            {
+                // The token's issuer did not match any provider we could reach, and at least one trusted
+                // discovery endpoint was unavailable - so we cannot determine whether the issuer is trusted.
+                // Surface this as a transient upstream failure (503) rather than rejecting a possibly-valid token.
+                throw new ServiceNotAvailableException(
+                    "Unable to verify the token issuer: a trusted identity provider's discovery endpoint is unavailable");
+            }
+
+            // All trusted discovery endpoints were reachable and none advertised this issuer. Do not echo the
+            // untrusted issuer value back to the caller; record it server-side for diagnostics instead.
+            _logger.LogWarning("Rejected access token from untrusted issuer '{issuer}'", jwt.Issuer);
+            throw new InvalidAccessTokenException("Untrusted token issuer");
+        }
 
         var validationParameters = new TokenValidationParameters
         {
-            IssuerSigningKeys = signingKeys,
+            IssuerSigningKeys = discoveryDocument.SigningKeys,
             ValidateIssuerSigningKey = true,
-            ValidateAudience = false,
-            ValidateIssuer = false
+            ValidIssuers = new[] { discoveryDocument.Issuer },
+            ValidateIssuer = true,
+            ValidateAudience = false
         };
 
         try
@@ -237,26 +190,71 @@ public class AuthenticationMiddleware : IFunctionsWorkerMiddleware
         }
     }
 
-    private bool ValidateScopes(ClaimsPrincipal claimsPrincipal, string requiredScopes)
+    /// <summary>
+    /// Resolves the trusted OIDC discovery document whose advertised issuer matches the token's issuer.
+    /// Each provider's discovery document is fetched independently so that an outage of one provider does
+    /// not prevent validation of tokens issued by the other.
+    /// </summary>
+    /// <param name="issuer">The (untrusted) issuer claimed by the token.</param>
+    /// <returns>
+    /// The matching discovery document, or <c>null</c> if no reachable provider advertised the issuer.
+    /// The boolean is <c>true</c> when at least one provider's discovery endpoint could not be reached,
+    /// meaning the allow-list could not be fully evaluated.
+    /// </returns>
+    private async Task<(OpenIdConnectConfiguration? Config, bool DiscoveryUnavailable)> ResolveIssuerConfiguration(string issuer)
     {
-        var requiredScopeList = requiredScopes.Split(',');
+        var discoveryUnavailable = false;
+
+        var providers = new[]
+        {
+            ("Maskinporten", CmMaskinporten),
+            ("AltinnPlatform", CmAltinnPlatform)
+        };
+
+        foreach (var (providerName, configurationManager) in providers)
+        {
+            OpenIdConnectConfiguration config;
+            try
+            {
+                config = await configurationManager.GetConfigurationAsync();
+            }
+            catch (Exception ex)
+            {
+                // This provider's discovery endpoint is currently unreachable. Remember that the allow-list
+                // could not be fully evaluated, but keep checking other providers so a token from a reachable
+                // issuer still validates.
+                _logger.LogWarning(ex, "Failed to load OIDC discovery document for {provider}", providerName);
+                discoveryUnavailable = true;
+                continue;
+            }
+
+            if (config.Issuer == issuer)
+            {
+                return (config, false);
+            }
+        }
+
+        return (null, discoveryUnavailable);
+    }
+
+    private bool ValidateScopes(ClaimsPrincipal claimsPrincipal)
+    {
         var principalScopeList = claimsPrincipal.GetScopes();
         if (principalScopeList == null)
         {
             return false;
         }
 
-        foreach (var requiredScope in requiredScopeList)
+        // Replaced with StartsWith to allow new scope root and removed foreach
+        // Old: Note that this had .Contains does a substring match. This means that a requirement for
+        // eg. altinn:somescope will be satisfied by altinn:somescope/foo or any scope containing the substring
+        // "altinn:somescope". As ":" is not a valid subscope character in Maskinporten, this ought to be
+        // safe as it cannot be abused by something like "difi:altinn:somescope"
+        if (!principalScopeList.Any(x => x.StartsWith(DefaultScope) || x.StartsWith(NewScopeRoot)))
         {
-            // Note that this use of .Contains does a substring match. This means that a requirement for
-            // eg. altinn:somescope will be satisfied by altinn:somescope/foo or any scope containing the substring
-            // "altinn:somescope". As ":" is not a valid subscope character in Maskinporten, this ought to be
-            // safe as it cannot be abused by something like "difi:altinn:somescope"
-            if (!principalScopeList.Any(x => x.Contains(requiredScope)))
-            {
-                return false;
-            }
+            return false;
         }
+        
 
         return true;
     }

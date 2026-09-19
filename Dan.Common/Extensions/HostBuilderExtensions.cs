@@ -1,5 +1,7 @@
 using System.Reflection;
 using Azure.Core.Serialization;
+using Azure.Identity;
+using Dan.Common.Handlers;
 using Dan.Common.Interfaces;
 using Dan.Common.Services;
 using Microsoft.Azure.Functions.Worker;
@@ -13,6 +15,9 @@ using Polly.Registry;
 
 namespace Dan.Common.Extensions;
 
+/// <summary>
+/// HostBuilder extensions for setting up Dan plugin default configurations
+/// </summary>
 public static class HostBuilderExtensions
 {
     /// <summary>
@@ -27,14 +32,7 @@ public static class HostBuilderExtensions
     public static IHostBuilder ConfigureDanPluginDefaults(this IHostBuilder builder)
     {
         builder
-            .ConfigureFunctionsWorkerDefaults(workerBuilder =>
-            {
-                workerBuilder
-                    // Using preview package Microsoft.Azure.Functions.Worker.ApplicationInsights, see https://github.com/Azure/azure-functions-dotnet-worker/pull/944
-                    // Requires APPLICATIONINSIGHTS_CONNECTION_STRING being set. Note that host.json logging settings are not loaded to worker, and requires
-                    .AddApplicationInsights()
-                    .AddApplicationInsightsLogger();
-            }, options =>
+            .ConfigureFunctionsWorkerDefaults(_ =>{}, options =>
             {
                 options.Serializer = new NewtonsoftJsonObjectSerializer(
                     // Use Newtonsoft.Json for serializing in order to support TypeNameHandling and other annotations on. This should be ported to System.Text.Json at some point.
@@ -53,7 +51,9 @@ public static class HostBuilderExtensions
             {
                 services.AddLogging();
                 services.AddHttpClient();
-
+                services.AddApplicationInsightsTelemetryWorkerService();
+                services.ConfigureFunctionsApplicationInsights();
+                
                 // You will need extra configuration because AI will only log per default Warning (default AI configuration). As this is a provider-specific
                 // setting, it will override all non-provider (Logging:LogLevel)-based configurations. 
                 // https://github.com/microsoft/ApplicationInsights-dotnet/blob/main/NETCORE/src/Shared/Extensions/ApplicationInsightsExtensions.cs#L427
@@ -100,11 +100,27 @@ public static class HostBuilderExtensions
                 services.AddHttpClient(Constants.SafeHttpClient,
                         client => { client.Timeout = TimeSpan.FromSeconds(httpClientTimeoutSeconds); })
                     .AddPolicyHandlerFromRegistry(Constants.SafeHttpClientPolicy);
+                
+                // Using safehttpclient settings, but will add auth handler for talking with plugins
+                services.AddHttpClient(Constants.PluginHttpClient,
+                        client => { client.Timeout = TimeSpan.FromSeconds(httpClientTimeoutSeconds); })
+                    .AddPolicyHandlerFromRegistry(Constants.SafeHttpClientPolicy)
+                    .AddHttpMessageHandler<PluginAuthorizationMessageHandler>();
 
                 // Add a common service to fetch information from the CCR ("Enhetsregisteret"). Using a default API-client (which just wraps a HttpClient), which
                 // calls a proxy in Core by default. Core uses the same service, but a different IEntityRegistryApiClientService which utilizes a distributed cache.
                 services.AddSingleton<IEntityRegistryService, EntityRegistryService>();
                 services.AddSingleton<IEntityRegistryApiClientService, DefaultEntityRegistryApiClientService>();
+                services.AddSingleton<IPluginCredentialService, PluginCredentialService>();
+
+                services.AddMemoryCache();
+                services.AddTransient<PluginAuthorizationMessageHandler>();
+                services.AddTransient<IDanPluginClientService, DanPluginClientService>();
+                services.AddTransient<ICcrClientService, CcrClientService>();
+
+                // This can be overwritten by plugins by doing their own registrations if needing special options
+                var defaultCredentials = new DefaultAzureCredential();
+                services.AddSingleton(defaultCredentials);
 
                 // Try to add the first IEvidenceSourceMetadata implementation we can find in the entry assembly
                 var evidenceSourceMetadataServiceType = typeof(IEvidenceSourceMetadata);

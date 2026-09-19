@@ -1,6 +1,10 @@
-using System.Reflection;
+using Altinn.ApiClients.Maskinporten.Config;
+using Altinn.Dd.Correspondence.Extensions;
+using Altinn.Dd.Correspondence.Options;
 using Azure.Core.Serialization;
-using Dan.Common.Interfaces;
+using Azure.Identity;
+using Dan.Common;
+using Dan.Common.Handlers;
 using Dan.Common.Models;
 using Dan.Common.Services;
 using Dan.Core.Attributes;
@@ -16,7 +20,6 @@ using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Hosting.Internal;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Polly;
@@ -25,8 +28,12 @@ using Polly.Caching.Distributed;
 using Polly.Caching.Serialization.Json;
 using Polly.Extensions.Http;
 using Polly.Registry;
+using StackExchange.Redis;
+using System.Reflection;
+using System.Runtime.ConstrainedExecution;
+using System.Security.Cryptography.X509Certificates;
 
-IHostEnvironment danHostingEnvironment = new HostingEnvironment();
+IHostEnvironment danHostingEnvironment;
 var host = new HostBuilder()
     .ConfigureAppConfiguration((hostContext, config) =>
     {
@@ -56,23 +63,15 @@ var host = new HostBuilder()
 
         builder.UseMiddleware<DiagnosticsHeaderInjectionMiddleware>();
         builder.UseMiddleware<FunctionContextAccessorMiddleware>();
-
-        if (!danHostingEnvironment.IsLocalDevelopment())
-        {
-            // Using preview package Microsoft.Azure.Functions.Worker.ApplicationInsights, see https://github.com/Azure/azure-functions-dotnet-worker/pull/944
-            // Requires APPLICATIONINSIGHTS_CONNECTION_STRING being set. Note that host.json logging settings only affects the host, not the workers. 
-            // See worker-logging.json for other logging settings, and the discussion on https://github.com/Azure/azure-functions-dotnet-worker/issues/1182
-            builder
-                .AddApplicationInsights()
-                .AddApplicationInsightsLogger();
-        }
-
     }, options =>
     {
         options.Serializer = new NewtonsoftJsonObjectSerializer();
     })
     .ConfigureServices((_, services) =>
     {
+        services.AddApplicationInsightsTelemetryWorkerService();
+        services.ConfigureFunctionsApplicationInsights();
+        
         // You will need extra configuration because above will only log per default Warning (default AI configuration). As this is a provider-specific
         // setting, it will override all non-provider (Logging:LogLevel)-based configurations. 
         // https://github.com/microsoft/ApplicationInsights-dotnet/blob/main/NETCORE/src/Shared/Extensions/ApplicationInsightsExtensions.cs#L427
@@ -90,34 +89,84 @@ var host = new HostBuilder()
             }
         });
 
-        services.AddStackExchangeRedisCache(option =>
+        DefaultAzureCredentialOptions options = new()
         {
-            option.Configuration = Settings.RedisCacheConnectionString;
-        });
+            Diagnostics =
+            {
+                LoggedHeaderNames = { "x-ms-request-id" },
+                LoggedQueryParameters = { "api-version" },
+                IsAccountIdentifierLoggingEnabled = true
+            }
+        };
+        DefaultAzureCredential credentials = new(options);
+        services.AddSingleton(credentials);
+        // In case of still using access key (or local redis), 
+        if (Settings.RedisCacheConnectionString.Contains("password=") ||
+            Settings.RedisCacheConnectionString.Contains("127.0.0.1"))
+        {
+            services.AddStackExchangeRedisCache(option =>
+            {
+                option.Configuration = Settings.RedisCacheConnectionString;
+            });
+        }
+        else
+        {
+            services.AddStackExchangeRedisCache(option =>
+            {
+                option.ConnectionMultiplexerFactory = async () =>
+                {
+                    var configurationOptions = await ConfigurationOptions
+                        .Parse(Settings.RedisCacheConnectionString)
+                        .ConfigureForAzureWithTokenCredentialAsync(credentials);
+
+                    var connectionMultiplexer = await ConnectionMultiplexer.ConnectAsync(configurationOptions);
+
+                    return connectionMultiplexer;
+                };
+            });
+        }
+        
 
         var sp = services.BuildServiceProvider();
         var distributedCache = sp.GetRequiredService<IDistributedCache>();
 
-        services.AddSingleton(_ => new CosmosClientBuilder(Settings.CosmosDbConnection).Build());
-        services.AddSingleton<IChannelManagerService, ChannelManagerService>();
-        services.AddSingleton<IAltinnCorrespondenceService, AltinnCorrespondenceService>();
+        // Cosmos emulator doesn't support credential auth
+        if (Settings.CosmosDbConnection.StartsWith("AccountEndpoint="))
+        {
+            services.AddSingleton(_ => new CosmosClientBuilder(Settings.CosmosDbConnection).Build());
+        }
+        else
+        {
+            services.AddSingleton(_ => new CosmosClientBuilder(Settings.CosmosDbConnection, credentials).Build());
+            
+        }
+        
         services.AddSingleton<IAvailableEvidenceCodesService, AvailableEvidenceCodesService>();
         services.AddSingleton<IAltinnServiceOwnerApiService, AltinnServiceOwnerApiService>();
         services.AddSingleton<ITokenRequesterService, TokenRequesterService>();
         services.AddSingleton<IServiceContextService, ServiceContextService>();
         services.AddSingleton<IAccreditationRepository, CosmosDbAccreditationRepository>();
-        services.AddSingleton<IEntityRegistryService, EntityRegistryService>();
-        services.AddSingleton<IEntityRegistryApiClientService, CachingEntityRegistryApiClientService>();
+        // Using explicit namespacing until the interface is removed from common in the future
+        services.AddSingleton<Dan.Core.Services.Interfaces.IEntityRegistryService, Dan.Core.Services.EntityRegistryService>();
+        services.AddSingleton<Dan.Core.Services.Interfaces.IEntityRegistryApiClientService, CachingEntityRegistryApiClientService>();
         services.AddSingleton<IFunctionContextAccessor, FunctionContextAccessor>();
+        services.AddSingleton<IPluginCredentialService, PluginCredentialService>();
 
         services.AddScoped<IEvidenceStatusService, EvidenceStatusService>();
         services.AddScoped<IEvidenceHarvesterService, EvidenceHarvesterService>();
-        services.AddScoped<IConsentService, ConsentService>();
+        services.AddScoped<IAltinn3ConsentService, Altinn3ConsentService>();
+        services.AddScoped<IAltinn3NotificationsService, Altinn3NotificationsService>();
         services.AddScoped<IRequirementValidationService, RequirementValidationService>();
         services.AddScoped<IAuthorizationRequestValidatorService, AuthorizationRequestValidatorService>();
         services.AddScoped<IRequestContextService, RequestContextService>();
-
+        services.AddScoped<IUsageStatisticsService, UsageStatisticsService>();
+        
         services.AddTransient<ExceptionDelegatingHandler>();
+        services.AddTransient<PluginAuthorizationMessageHandler>();
+
+        // Altinn 3 messaging
+
+        AddAltinn3Messaging(services);
 
         services.AddPolicyRegistry(new PolicyRegistry()
             {
@@ -137,6 +186,12 @@ var host = new HostBuilder()
                         ), AvailableEvidenceCodesService.DistributedCacheTtl)
                 },
                 {
+                    CachingEntityRegistryApiClientService.EntityRegistryListCachePolicy, Policy.CacheAsync(
+                        distributedCache.AsAsyncCacheProvider<string>().WithSerializer(
+                            new JsonSerializer<List<EntityRegistryUnit>>(new JsonSerializerSettings())),
+                        TimeSpan.FromHours(12))
+                },
+                {
                     "MaskinportenTokenPolicy", Policy.CacheAsync(
                         distributedCache.AsAsyncCacheProvider<string>(),
                         new Oauth2AccessTokenCachingStrategy())
@@ -147,14 +202,25 @@ var host = new HostBuilder()
                 }
             });
 
-        // Default client to use in harvesting
-        services.AddHttpClient("SafeHttpClient", client =>
+        // memory cache used for plugin auth handler
+        services.AddMemoryCache();
+        // Default clients to use in harvesting
+        services.AddHttpClient(Constants.SafeHttpClient, client =>
             {
                 client.DefaultRequestHeaders.Add("Accept", "application/json");
                 client.BaseAddress = new Uri(Settings.ApiUrl);
             })
             .AddPolicyHandlerFromRegistry("DefaultCircuitBreaker")
             .AddHttpMessageHandler<ExceptionDelegatingHandler>();
+        
+        services.AddHttpClient(Constants.PluginHttpClient, client =>
+            {
+                client.DefaultRequestHeaders.Add("Accept", "application/json");
+                client.BaseAddress = new Uri(Settings.ApiUrl);
+            })
+            .AddPolicyHandlerFromRegistry("DefaultCircuitBreaker")
+            .AddHttpMessageHandler<ExceptionDelegatingHandler>()
+            .AddHttpMessageHandler<PluginAuthorizationMessageHandler>();
 
         // Client used for getting evidence code lists from data sources
         services.AddHttpClient("EvidenceCodesClient", client =>
@@ -162,7 +228,8 @@ var host = new HostBuilder()
                 client.DefaultRequestHeaders.Add("Accept", "application/json");
                 client.Timeout = TimeSpan.FromSeconds(25);
             })
-            .AddHttpMessageHandler<ExceptionDelegatingHandler>();
+            .AddHttpMessageHandler<ExceptionDelegatingHandler>()
+            .AddHttpMessageHandler<PluginAuthorizationMessageHandler>();
 
         // Client with enterprise certificate authentication
         services.AddHttpClient("ECHttpClient", client =>
@@ -186,7 +253,36 @@ var host = new HostBuilder()
             })
             .AddHttpMessageHandler<ExceptionDelegatingHandler>();
 
+        // Client used for the Altinn 3 Notifications API
+        services.AddHttpClient(Constants.Altinn3NotificationsHttpClient, client =>
+            {
+                client.DefaultRequestHeaders.Add("Accept", "application/json");
+            })
+            .AddPolicyHandlerFromRegistry("DefaultCircuitBreaker")
+            .AddHttpMessageHandler<ExceptionDelegatingHandler>();
+
     })
     .Build();
+
+void AddAltinn3Messaging(IServiceCollection services)
+{    
+    // Load cert via our working code path and re-export as passwordless PKCS#12
+    // to avoid CryptographicException in Maskinporten library on Azure
+    var cert = Settings.OedMessagingCert;
+    var encodedCert = Convert.ToBase64String(cert.Export(X509ContentType.Pkcs12));
+
+    services.AddDdCorrespondenceService(options =>
+    {
+        options.MaskinportenSettings = new MaskinportenSettings
+        {
+            ClientId = Settings.MaskinportenClientId,
+            Environment = Settings.MaskinportenUrl.Contains("test") ? "test" : "prod",
+            EnableDebugLogging = Settings.MaskinportenUrl.Contains("test"),
+            EncodedX509 = encodedCert
+        };
+        options.ResourceId = Settings.AltinnMessageResource;        
+        options.Environment = Settings.MaskinportenUrl.Contains("test") ? ApiEnvironment.Staging : ApiEnvironment.Production;       
+    });
+}
 
 await host.RunAsync();

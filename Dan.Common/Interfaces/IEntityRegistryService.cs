@@ -1,4 +1,9 @@
 ﻿namespace Dan.Common.Interfaces;
+
+/// <summary>
+/// Service for handling entity registry
+/// </summary>
+[Obsolete("Use Dan.Common.Services.ICcrClientService instead.")]
 public interface IEntityRegistryService
 {
     /// <summary>

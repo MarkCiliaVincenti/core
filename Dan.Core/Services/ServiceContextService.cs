@@ -14,6 +14,7 @@ public class ServiceContextService : IServiceContextService
             new ServiceContext() {
                 Name = "eBevis",
                 Id = "ebevis-product",
+                Owner = "Brønnøysundregistrene",
                 ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB },
                 AuthorizationRequirements = new List<Requirement>() {
                     new PartyTypeRequirement()
@@ -22,7 +23,11 @@ public class ServiceContextService : IServiceContextService
                         {
                             new KeyValuePair<AccreditationPartyTypes, PartyTypeConstraint>(AccreditationPartyTypes.Requestor,PartyTypeConstraint.PublicAgency)
                         }
-                    }
+                    },
+                    new MaskinportenScopeRequirement()
+                    {
+                        RequiredScopes = new List<string> { "altinn:dataaltinnno/ebevis" }
+                    },
                 },
                 ServiceContextTextTemplate = new EBevisServiceContextTextTemplate()
             },
@@ -30,6 +35,7 @@ public class ServiceContextService : IServiceContextService
             {
                 Name = "Drosjeloyve",
                 Id = "drosjeloyve-product",
+                Owner = "Novari IKS",
                 ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB, Constants.LANGUAGE_CODE_NORWEGIAN_NN },
                 AuthorizationRequirements = new List<Requirement>() {
                     new PartyTypeRequirement()
@@ -38,7 +44,11 @@ public class ServiceContextService : IServiceContextService
                         {
                             new KeyValuePair<AccreditationPartyTypes, PartyTypeConstraint>(AccreditationPartyTypes.Requestor,PartyTypeConstraint.PublicAgency)
                         }
-                    }
+                    },
+                    new MaskinportenScopeRequirement()
+                    {
+                        RequiredScopes = new List<string> { "altinn:dataaltinnno/drosje" }
+                    },
                 },
                 ServiceContextTextTemplate = new DrosjeloyveServiceContextTextTemplate()
             },
@@ -46,6 +56,7 @@ public class ServiceContextService : IServiceContextService
             {
                 Name = "Tilda",
                 Id = "tilsynsdata-product",
+                Owner = "Brønnøysundregistrene",
                 ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB },
                 AuthorizationRequirements = new List<Requirement>() {
                     new MaskinportenScopeRequirement()
@@ -60,44 +71,14 @@ public class ServiceContextService : IServiceContextService
                         }
                     }
                 }
-            },
-            new ServiceContext()
-            {
-                Name = "Seri�sitetsinformasjon",
-                Id = "seriositet-product",
-                ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB },
-                AuthorizationRequirements = new List<Requirement>() {
-                    new PartyTypeRequirement()
-                    {
-                        AllowedPartyTypes = new AllowedPartyTypesList()
-                        {
-                            new KeyValuePair<AccreditationPartyTypes, PartyTypeConstraint>(AccreditationPartyTypes.Requestor,PartyTypeConstraint.PrivateEnterprise)
-                        }
-                    },
-                    new AccreditationPartyRequirement()
-                    {
-                        PartyRequirements = new List<AccreditationPartyRequirementType>()
-                        {
-                            AccreditationPartyRequirementType.RequestorAndOwnerAreEqual
-                        }
-                    }
-                },
-                ServiceContextTextTemplate = new SeriositetServiceContextTextTemplate()
-            },
+            },          
             new ServiceContext()
             {
                 Name = "OED",
                 Id = "oed-product",
+                Owner = "Digitaliseringsdirektoratet",
                 ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB },
                 AuthorizationRequirements = new List<Requirement>() {
-                    new PartyTypeRequirement()
-                    {
-                        AllowedPartyTypes = new AllowedPartyTypesList()
-                        {
-                            new KeyValuePair<AccreditationPartyTypes, PartyTypeConstraint>(AccreditationPartyTypes.Subject,PartyTypeConstraint.PrivatePerson)
-
-                        }
-                    },
                     new MaskinportenScopeRequirement()
                     {
                         RequiredScopes = new List<string>() { "altinn:dataaltinnno/oed" }
@@ -108,17 +89,10 @@ public class ServiceContextService : IServiceContextService
             {
                 Name = "Advokatregisteret",
                 Id = "tilsynsraad-product",
+                Owner = "Advokattilsynet", 
                 ValidLanguages= new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB},
                 AuthorizationRequirements = new List<Requirement>()
-                {
-
-                    new PartyTypeRequirement()
-                    {
-                        AllowedPartyTypes = new AllowedPartyTypesList()
-                        {
-                            new KeyValuePair<AccreditationPartyTypes, PartyTypeConstraint>(AccreditationPartyTypes.Requestor, PartyTypeConstraint.PublicAgency)
-                        }
-                    },
+                { 
                     new AccreditationPartyRequirement()
                     {
                         PartyRequirements = new List<AccreditationPartyRequirementType>()
@@ -132,13 +106,13 @@ public class ServiceContextService : IServiceContextService
             {
                 Name = "DigitaleHelgeland",
                 Id = "dihe-product",
+                Owner = "Digitale Helgeland",
                 ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB },
                 AuthorizationRequirements = new List<Requirement>() {
                     new PartyTypeRequirement()
                     {
                         AllowedPartyTypes = new AllowedPartyTypesList()
                         {
-                            new KeyValuePair<AccreditationPartyTypes, PartyTypeConstraint>(AccreditationPartyTypes.Subject,PartyTypeConstraint.PrivatePerson),
                             new KeyValuePair<AccreditationPartyTypes, PartyTypeConstraint>(AccreditationPartyTypes.Requestor, PartyTypeConstraint.PublicAgency)
                         }
                     },
@@ -152,49 +126,12 @@ public class ServiceContextService : IServiceContextService
                         RequiredScopes = new List<string>() { "altinn:dataaltinnno/dihe" }
                     }
                 }
-            },
-            new ServiceContext()
-            {
-                Name = "EURES",
-                Id = "eures-product",
-                ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB },
-                AuthorizationRequirements = new List<Requirement>() {
-                    new MaskinportenScopeRequirement()
-                    {
-                        RequiredScopes = new List<string>() { "altinn:dataaltinnno/eures" }
-                    }
-                },
-                ServiceContextTextTemplate = new EuresServiceContextTextTemplate()
-            },
-            new ServiceContext()
-            {
-                Name = "�konomisk informasjon",
-                Id = "okinfo-product",
-                ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB },
-                AuthorizationRequirements = new List<Requirement>() {
-                    new MaskinportenScopeRequirement()
-                    {
-                        RequiredScopes = new List<string>() { "altinn:dataaltinnno/okinfo" }
-                    },
-                    new PartyTypeRequirement()
-                    {
-                        AllowedPartyTypes = new AllowedPartyTypesList()
-                        {
-                            new KeyValuePair<AccreditationPartyTypes, PartyTypeConstraint>(AccreditationPartyTypes.Subject,PartyTypeConstraint.PrivateEnterprise),
-                            new KeyValuePair<AccreditationPartyTypes, PartyTypeConstraint>(AccreditationPartyTypes.Requestor, PartyTypeConstraint.PublicAgency)
-                        }
-                    },
-                    new AccreditationPartyRequirement()
-                    {
-                        PartyRequirements = new List<AccreditationPartyRequirementType>() { AccreditationPartyRequirementType.RequestorAndOwnerAreEqual }
-                    }
-                },
-                ServiceContextTextTemplate = new OkinfoServiceContextTextTemplate()
-            },
+            },  
             new ServiceContext()
             {
                 Name = "Reelle rettighetshavere",
                 Id = "reelle-product",
+                Owner = "Brønnøysundregistrene",
                 ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB },
                 AuthorizationRequirements = new List<Requirement>() {
                     new MaskinportenScopeRequirement()
@@ -211,6 +148,7 @@ public class ServiceContextService : IServiceContextService
             {
                 Name = "eDueDiligence",
                 Id = "duediligence-product",
+                Owner = "Brønnøysundregistrene",
                 ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB },
                 AuthorizationRequirements = new List<Requirement>() {
                     new MaskinportenScopeRequirement()
@@ -227,6 +165,7 @@ public class ServiceContextService : IServiceContextService
             {
                 Name = "DigitalGravferdsmelding",
                 Id = "dgm-product",
+                Owner = "Statsforvalteren i Vestfold og Telemark",
                 ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB },
                 AuthorizationRequirements = new List<Requirement>() {
                     new MaskinportenScopeRequirement()
@@ -239,6 +178,54 @@ public class ServiceContextService : IServiceContextService
                     }
                 }
             },
+             new ServiceContext()
+            {
+                Name = "Bits kontrollinformasjon",
+                Id = "bits-product",
+                Owner = "BITS AS",
+                ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB },
+                AuthorizationRequirements = new List<Requirement>()
+                {
+                    new MaskinportenScopeRequirement() { RequiredScopes = new List<string> {"altinn:dataaltinnno/kontrollinformasjon"}}
+                }
+            },
+			new ServiceContext
+            {
+                Name = "DAN-test",
+                Id = "dantest-product",
+                Owner = "Digitaliseringsdirektoratet",
+                ValidLanguages = [Constants.LANGUAGE_CODE_NORWEGIAN_NB],
+                AuthorizationRequirements =
+                [
+                    new MaskinportenScopeRequirement{RequiredScopes = ["dan:test"]}
+                ],
+                ServiceContextTextTemplate = new DanTestServiceContextTextTemplate()
+            },
+            new ServiceContext()
+            {
+                Name = "Altinn Studio-apps",
+                Id = "altinnstudioapps-product",
+                Owner = "Digitaliseringsdirektoratet",
+                ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB },
+                AuthorizationRequirements = new List<Requirement>()
+                {
+                    new MaskinportenScopeRequirement()
+                    {
+                        RequiredScopes = new List<string>() { "dan:altinnstudioapps" }
+                    },
+                    new ProvideOwnTokenRequirement(),
+                    new AccreditationPartyRequirement()
+                    {
+                        PartyRequirements = new List<AccreditationPartyRequirementType>() { AccreditationPartyRequirementType.RequestorAndOwnerAreEqual }
+                    }
+                }
+            }, 
+            new ServiceContext() {
+                Name = "NSG",
+                Id = "nsg-product",
+                Owner = "Brønnøysundregistrene",
+                ValidLanguages = new List<string>() {Constants.LANGUAGE_CODE_NORWEGIAN_NB }
+            }
         };
 
         return await Task.FromResult(serviceContexts);

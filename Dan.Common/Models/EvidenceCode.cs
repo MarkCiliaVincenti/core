@@ -138,4 +138,19 @@ public class EvidenceCode
     [DataMember(Name = "timeout")]
     [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
     public int? Timeout { get; set; }
+    
+    /// <summary>
+    /// License of the evidence source data
+    /// </summary>
+    [DataMember(Name = "license")]
+    [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+    public string? License { get; set; }
+    
+    /// <summary>
+    /// Optional setting for aliases
+    /// Allows for the same dataset to be shared between service contexts with different names.
+    /// </summary>
+    [DataMember(Name = "datasetAliases")]
+    [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+    public List<DatasetAlias>? DatasetAliases { get; set; }
 }

@@ -1,115 +1,109 @@
-﻿using Dan.Common.Models;
+﻿using AsyncKeyedLock;
+using Dan.Common.Extensions;
+using Dan.Common.Models;
 using Dan.Core.Config;
 using Dan.Core.Extensions;
-using Dan.Core.Services.Interfaces;
-using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
-using Polly;
-using Polly.Registry;
-using System.Text;
 using Dan.Core.Helpers;
+using Dan.Core.Services.Interfaces;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
+using Polly.Registry;
 
 namespace Dan.Core.Services;
 
-public class AvailableEvidenceCodesService : IAvailableEvidenceCodesService
+public class AvailableEvidenceCodesService(
+    ILoggerFactory loggerFactory,
+    IHttpClientFactory httpClientFactory,
+    IPolicyRegistry<string> policyRegistry,
+    IDistributedCache distributedCache,
+    IServiceContextService serviceContextService,
+    IFunctionContextAccessor functionContextAccessor)
+    : IAvailableEvidenceCodesService
 {
     public static TimeSpan DistributedCacheTtl = TimeSpan.FromHours(12);
+    private readonly ILogger<IAvailableEvidenceCodesService> _logger = loggerFactory.CreateLogger<AvailableEvidenceCodesService>();
 
-    private readonly ILogger<IAvailableEvidenceCodesService> _logger;
-    private readonly IHttpClientFactory _httpClientFactory;
-    private readonly IPolicyRegistry<string> _policyRegistry;
-    private readonly IDistributedCache _distributedCache;
-    private readonly IServiceContextService _serviceContextService;
-
-    private List<EvidenceCode> _memoryCache = new();
-    private DateTime _updateMemoryCache = DateTime.MinValue;
-    private readonly SemaphoreSlim _semaphoreForceRefresh = new(1, 1);
-    private readonly SemaphoreSlim _semaphore = new(1, 1);
-    private readonly IFunctionContextAccessor _functionContextAccessor;
-    private const int MemoryCacheTtlSeconds = 120;
+    private readonly AsyncNonKeyedLocker semaphore = new(1);
+    private const int MemoryCacheTtlSeconds = 600;
 
     private const string CachingPolicy = "EvidenceCodesCachePolicy";
     private const string HttpClientName = "EvidenceCodesClient";
     private const string CacheContextKey = "AvailableEvidenceCodes";
     private const string CacheResponseHeader = "x-cache";
 
-    public AvailableEvidenceCodesService(
-        ILoggerFactory loggerFactory,
-        IHttpClientFactory httpClientFactory,
-        IPolicyRegistry<string> policyRegistry,
-        IDistributedCache distributedCache,
-        IServiceContextService serviceContextService,
-        IFunctionContextAccessor functionContextAccessor)
-    {
-        _logger = loggerFactory.CreateLogger<AvailableEvidenceCodesService>();
-        _httpClientFactory = httpClientFactory;
-        _policyRegistry = policyRegistry;
-        _distributedCache = distributedCache;
-        _serviceContextService = serviceContextService;
-        _functionContextAccessor = functionContextAccessor;
-    }
-
     /// <summary>
-    /// Gets the list of current active evidence codes. This endpoint can be hit several times during a request. In order to reduce I/O to the distributed cache, it employs
-    /// an additional layer of caching via memory. Uses semaphores to handle concurrent writes to the caches. 
+    /// Gets the list of current active evidence codes. This endpoint can be hit several times during a request.
     /// </summary>
     /// <param name="forceRefresh">If true will evict the current cache (both in-memory and distributed) and force a source-level refresh</param>
     /// <returns>A list of active evidence codes</returns>
     public async Task<List<EvidenceCode>> GetAvailableEvidenceCodes(bool forceRefresh = false)
     {
-        // Cache still valid
-        if (!forceRefresh && DateTime.UtcNow < _updateMemoryCache)
+        List<EvidenceCode>? evidenceCodes;
+        if (!forceRefresh)
         {
-            SetCacheDiagnosticsHeader("hit-local");
-            return FilterInactive(_memoryCache);
+            evidenceCodes = await distributedCache.GetValueAsync<List<EvidenceCode>>(CacheContextKey);
+            if (evidenceCodes is not null)
+            {
+                SetCacheDiagnosticsHeader("hit-distributed");
+                evidenceCodes = FilterEvidenceCodes(evidenceCodes);
+                return evidenceCodes;
+            }
         }
 
         if (forceRefresh)
         {
-            // Force refresh has been called. This is only performed manually or in conjuction with a deploy.
-            // Use a separate semaphore to ensure only a single thread can do this at a time without blocking other requests
-            await _semaphoreForceRefresh.WaitAsync();
-            try
-            {
-                await RefreshEvidenceCodesCache();
-                return FilterInactive(_memoryCache);
-            }
-            finally
-            {
-                _semaphoreForceRefresh.Release();
-            }
+            SetCacheDiagnosticsHeader("force-evict");
         }
 
-        // The memory cache is expired. We do not know if Redis cache is expired, as this is handled by Polly.
-        await _semaphore.WaitAsync();
-
-        try
+        using (await semaphore.LockAsync())
         {
-            // Recheck if another thread has updated the memory cache while we were waiting for the semaphore
-            if (DateTime.UtcNow < _updateMemoryCache)
+            if (!forceRefresh)
             {
-                SetCacheDiagnosticsHeader("hit-local-late");
-                return FilterInactive(_memoryCache);
+                // Checking if another thread finished caching
+                evidenceCodes = await distributedCache.GetValueAsync<List<EvidenceCode>>(CacheContextKey);
+                if (evidenceCodes is not null)
+                {
+                    evidenceCodes = FilterEvidenceCodes(evidenceCodes);
+                    return evidenceCodes;
+                }
             }
-
-            // This uses Polly to get from the distributed cache, or refresh from source if Redis cache is expired.
-            _memoryCache = await GetAvailableEvidenceCodesFromDistributedCache();
-            _updateMemoryCache = DateTime.UtcNow.AddSeconds(MemoryCacheTtlSeconds);
-
-            return FilterInactive(_memoryCache);
-
+            evidenceCodes = await GetAvailableEvidenceCodesFromEvidenceSources();
+            foreach (var es in evidenceCodes)
+            {
+                es.AuthorizationRequirements.ForEach(x => x.RequirementType = x.GetType().Name);
+            }
+            await distributedCache.SetValueAsync(CacheContextKey, evidenceCodes);
+            evidenceCodes = FilterEvidenceCodes(evidenceCodes);
+            return evidenceCodes;
         }
-        finally
+    }
+
+    public async Task<Dictionary<string, string>> GetAliases()
+    {
+        var aliases = new Dictionary<string, string>();
+        var availableEvienceCodes = await distributedCache.GetValueAsync<List<EvidenceCode>>(CacheContextKey);
+        if (availableEvienceCodes is null)
         {
-            _semaphore.Release();
+            return aliases;
         }
+        var aliasedEvidenceCodes = availableEvienceCodes
+            .Where(ec => ec.DatasetAliases is not null && ec.DatasetAliases.Count > 0);
+        foreach (var aliasedEvidenceCode in aliasedEvidenceCodes)
+        {
+            foreach (var alias in aliasedEvidenceCode.DatasetAliases!)
+            {
+                aliases.Add(alias.DatasetAliasName, aliasedEvidenceCode.EvidenceCodeName);
+            }
+        }
+
+        return aliases;
     }
 
     private void SetCacheDiagnosticsHeader(string value, bool overwrite = false)
     {
-        var requestContextService = _functionContextAccessor.FunctionContext?.InstanceServices.GetService<IRequestContextService>();
+        var requestContextService = functionContextAccessor.FunctionContext?.InstanceServices.GetService<IRequestContextService>();
         if (requestContextService == null) return;
         if (overwrite)
         {
@@ -122,57 +116,17 @@ public class AvailableEvidenceCodesService : IAvailableEvidenceCodesService
 
     }
 
-    /// <summary>
-    /// This fetches evidence codes from the sources and updates the distributed and in-memory caches. 
-    /// </summary>
-    /// <returns>Nothing</returns>
-    private async Task RefreshEvidenceCodesCache()
-    {
-        var evidenceCodes = await GetAvailableEvidenceCodesFromEvidenceSources();
-        SetCacheDiagnosticsHeader("force-evict");
-        if (evidenceCodes.Count == 0)
-        {
-            _logger.LogWarning("Failed to refresh evidence codes cache, received empty list");
-            return;
-        }
-
-        //  Add some metadata properties to make serialized output more parseable
-        foreach (var es in evidenceCodes)
-        {
-            es.AuthorizationRequirements.ForEach(x => x.RequirementType = x.GetType().Name);
-        }
-
-        await _distributedCache.SetAsync(CacheContextKey, Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(
-            evidenceCodes,
-            new JsonSerializerSettings
-            {
-                TypeNameHandling = TypeNameHandling.All
-            })),
-            new DistributedCacheEntryOptions
-            {
-                AbsoluteExpirationRelativeToNow = DistributedCacheTtl
-            });
-
-        _memoryCache = evidenceCodes;
-        _updateMemoryCache = DateTime.UtcNow.AddSeconds(MemoryCacheTtlSeconds);
-    }
-
-    private async Task<List<EvidenceCode>> GetAvailableEvidenceCodesFromDistributedCache()
-    {
-        SetCacheDiagnosticsHeader("hit-distributed");
-        var cachePolicy = _policyRegistry.Get<AsyncPolicy<List<EvidenceCode>>>(CachingPolicy);
-        return await cachePolicy.ExecuteAsync(
-            async _ => await GetAvailableEvidenceCodesFromEvidenceSources(), new Context(CacheContextKey));
-    }
-
     private async Task<List<EvidenceCode>> GetAvailableEvidenceCodesFromEvidenceSources()
     {
         SetCacheDiagnosticsHeader("miss", overwrite: true);
         using (var _ = _logger.Timer($"availableevidence-cache-refresh"))
         {
             var sources = GetEvidenceSources();
+
+            var serviceContextList = await serviceContextService.GetRegisteredServiceContexts();
             var evidenceCodes =
-                await Task.WhenAll(sources.Select(async source => await GetEvidenceCodesFromSource(source)));
+                await Task.WhenAll(sources.Select(async source => await GetEvidenceCodesFromSource(source, serviceContextList)));
+
             var evidenceCodesFlattened = evidenceCodes.SelectMany(x => x).ToList();
             await AddServiceContextAuthorizationRequirements(evidenceCodesFlattened);
             return evidenceCodesFlattened;
@@ -181,7 +135,7 @@ public class AvailableEvidenceCodesService : IAvailableEvidenceCodesService
 
     private async Task AddServiceContextAuthorizationRequirements(List<EvidenceCode> evidenceCodes)
     {
-        var serviceContexts = await _serviceContextService.GetRegisteredServiceContexts();
+        var serviceContexts = await serviceContextService.GetRegisteredServiceContexts();
         foreach (var serviceContext in serviceContexts)
         {
             if (!serviceContext.AuthorizationRequirements.Any()) continue;
@@ -192,15 +146,43 @@ public class AvailableEvidenceCodesService : IAvailableEvidenceCodesService
                 var serviceContextRequirements = serviceContext.AuthorizationRequirements.DeepCopy();
                 serviceContextRequirements.ForEach(x => x.AppliesToServiceContext = new List<string> { serviceContext.Name });
 
-                evidenceCode.AuthorizationRequirements.AddRange(serviceContextRequirements);
+                var existingRequirements = evidenceCode.AuthorizationRequirements
+                    .Where(r =>
+                        r.AppliesToServiceContext.Count == 0 ||
+                        r.AppliesToServiceContext.Contains(serviceContext.Name))
+                    .Select(GetRequirementFingerprint)
+                    .ToHashSet();
+
+                var nonDuplicateRequirements = serviceContextRequirements
+                    .Where(r => existingRequirements.Add(GetRequirementFingerprint(r)))
+                    .ToList();
+
+                evidenceCode.AuthorizationRequirements.AddRange(nonDuplicateRequirements);
             }
         }
     }
 
-    private async Task<List<EvidenceCode>> GetEvidenceCodesFromSource(EvidenceSource source)
+    private static string GetRequirementFingerprint(Requirement req)
     {
-        var client = _httpClientFactory.CreateClient(HttpClientName);
+        var savedAppliesToServiceContext = req.AppliesToServiceContext;
+        var savedRequirementType = req.RequirementType;
+        req.AppliesToServiceContext = new List<string>();
+        req.RequirementType = null;
 
+        var json = JsonConvert.SerializeObject(req, req.GetType(), new JsonSerializerSettings
+        {
+            NullValueHandling = NullValueHandling.Ignore
+        });
+
+        req.AppliesToServiceContext = savedAppliesToServiceContext;
+        req.RequirementType = savedRequirementType;
+
+        return $"{req.GetType().Name}:{json}";
+    }
+
+    private async Task<List<EvidenceCode>> GetEvidenceCodesFromSource(EvidenceSource source, List<ServiceContext> serviceContexts)
+    {
+        var client = httpClientFactory.CreateClient(HttpClientName);
         try
         {
             var request = new HttpRequestMessage(HttpMethod.Get, source.Url);
@@ -219,10 +201,18 @@ public class AvailableEvidenceCodesService : IAvailableEvidenceCodesService
             if (list == null)
             {
                 return new List<EvidenceCode>();
-            }
-
+            }            
+            
             list.ForEach(x => x.EvidenceSource = source.Provider);
-            return list;
+
+            var serviceContextNames = serviceContexts.Select(sc => sc.Name).ToHashSet();
+
+            // Filter evidence codes to only those that belong to known service contexts
+            var filteredList = list
+                .Where(x => x.BelongsToServiceContexts.Any(bsc => serviceContextNames.Contains(bsc)))
+                .ToList();
+
+            return filteredList;
         }
         catch (Exception ex)
         {
@@ -244,9 +234,49 @@ public class AvailableEvidenceCodesService : IAvailableEvidenceCodesService
         return sources;
     }
 
+    private static List<EvidenceCode> FilterEvidenceCodes(IEnumerable<EvidenceCode> evidenceCodes)
+    {
+        evidenceCodes = FilterInactive(evidenceCodes);
+        evidenceCodes = SplitAliases(evidenceCodes);
+        // foreach (var es in evidenceCodes)
+        // {
+        //     es.AuthorizationRequirements.ForEach(x => x.RequirementType = x.GetType().Name);
+        // }
+        return evidenceCodes.ToList();
+    }
     private static List<EvidenceCode> FilterInactive(IEnumerable<EvidenceCode> evidenceCodes)
     {
         return evidenceCodes.Where(IsDatasetValid).ToList();
+    }
+
+    private static List<EvidenceCode> SplitAliases(IEnumerable<EvidenceCode> evidenceCodes)
+    {
+        var evidenceCodesList = evidenceCodes.ToList();
+        var aliasedEvidenceCodes = evidenceCodesList.Where(e => e.DatasetAliases != null && e.DatasetAliases.Count != 0).ToList();
+        var splitEvidenceCodes = new List<EvidenceCode>();
+        foreach (var evidenceCode in aliasedEvidenceCodes)
+        {
+            foreach (var alias in evidenceCode.DatasetAliases!)
+            {
+                var aliasedEvidenceCode = evidenceCode.DeepCopy();
+                aliasedEvidenceCode.ServiceContext = alias.ServiceContext;
+                aliasedEvidenceCode.BelongsToServiceContexts = [alias.ServiceContext];
+                aliasedEvidenceCode.EvidenceCodeName = alias.DatasetAliasName;
+                aliasedEvidenceCode.DatasetAliases = null;
+                aliasedEvidenceCode.AuthorizationRequirements = aliasedEvidenceCode
+                    .AuthorizationRequirements
+                    .Where(a =>
+                        a.AppliesToServiceContext.Count == 0 ||
+                        a.AppliesToServiceContext.Contains(alias.ServiceContext))
+                    .ToList();
+                
+                splitEvidenceCodes.Add(aliasedEvidenceCode);
+            }
+
+            evidenceCodesList.Remove(evidenceCode);
+        }
+        evidenceCodesList.AddRange(splitEvidenceCodes);
+        return evidenceCodesList;
     }
 
     private static bool IsDatasetValid(EvidenceCode dataSet)

@@ -1,5 +1,6 @@
 ﻿namespace Dan.Common;
 
+#pragma warning disable 1591
 /// <summary>
 /// Shared constants in Dan
 /// </summary>
@@ -13,6 +14,10 @@ public static class Constants
     public const string SafeHttpClient = "SafeHttpClient";
 
     public const string SafeHttpClientPolicy = "SafeHttpClientPolicy";
+    
+    public const string PluginHttpClient = "PluginHttpClient";
+
+    public const string Altinn3NotificationsHttpClient = "Altinn3NotificationsHttpClient";
 
     public const string LANGUAGE_CODE_NORWEGIAN_NB = "no-nb";
 
@@ -81,3 +86,4 @@ public static class TextMacros
     public const string ConsentAndExternalReference = "#ConsentAndExternalReference#";
 
 }
+#pragma warning restore 1591

@@ -1,6 +1,5 @@
 ﻿using Dan.Common;
 using Dan.Common.Enums;
-using Dan.Common.Interfaces;
 using Dan.Common.Models;
 using Dan.Core.Config;
 using Dan.Core.Exceptions;
@@ -17,7 +16,7 @@ namespace Dan.Core.Services;
 public class AuthorizationRequestValidatorService : IAuthorizationRequestValidatorService
 {
     private readonly ILogger<AuthorizationRequestValidatorService> _log;
-    private readonly IEntityRegistryService _entityRegistryService;
+    private readonly Interfaces.IEntityRegistryService _entityRegistryService;
     private readonly IAvailableEvidenceCodesService _availableEvidenceCodesService;
     private readonly IRequirementValidationService _requirementValidationService;
     private readonly IRequestContextService _requestContextService;
@@ -35,7 +34,7 @@ public class AuthorizationRequestValidatorService : IAuthorizationRequestValidat
     /// <param name="requestContextService">The injected service for getting request context information</param>
     public AuthorizationRequestValidatorService(
         ILoggerFactory loggerFactory,
-        IEntityRegistryService entityRegistryService,
+        Interfaces.IEntityRegistryService entityRegistryService,
         IAvailableEvidenceCodesService availableEvidenceCodesService,
         IRequirementValidationService requirementValidationService,
         IRequestContextService requestContextService)
@@ -45,9 +44,6 @@ public class AuthorizationRequestValidatorService : IAuthorizationRequestValidat
         _availableEvidenceCodesService = availableEvidenceCodesService;
         _requirementValidationService = requirementValidationService;
         _requestContextService = requestContextService;
-
-        _entityRegistryService.UseCoreProxy = false;
-        _entityRegistryService.AllowTestCcrLookup = !Settings.IsProductionEnvironment;
     }
 
     /// <summary>
@@ -60,9 +56,22 @@ public class AuthorizationRequestValidatorService : IAuthorizationRequestValidat
         _authRequest = authorizationRequest ?? throw new InvalidAuthorizationRequestException();
         _registeredEvidenceCodes = await _availableEvidenceCodesService.GetAvailableEvidenceCodes();
         _evidenceCodesFromRequest = _registeredEvidenceCodes.Where(r => _authRequest.EvidenceRequests.Any(x => x.EvidenceCodeName == r.EvidenceCodeName)).ToList();
+        
+        var requirements = _evidenceCodesFromRequest.ToDictionary(es => es.EvidenceCodeName, es => es.AuthorizationRequirements);
+        if (authorizationRequest.FromEvidenceHarvester)
+        {
+            foreach (var requirement in requirements.Values)
+            {
+                requirement.RemoveAll(x => x.RequiredOnEvidenceHarvester == false);
+            }
+        }
 
+        var customSubject = requirements.Values.SelectMany(x => x).Any(req =>
+            req.RequirementType is not null &&
+            req.RequirementType.Equals("CustomSubjectRequirement", StringComparison.InvariantCultureIgnoreCase));
+        
         ValidateAndPopulateRequestor();
-        ValidateAndPopulateSubject();
+        ValidateAndPopulateSubject(customSubject);
         ValidateLegalBasisWellFormed();
         ValidateEvidenceRequestWellFormed();
         ValidateEvidenceCodesAreAvailableForServiceContext();
@@ -73,17 +82,13 @@ public class AuthorizationRequestValidatorService : IAuthorizationRequestValidat
         {
             await ValidateSubjectHasValidEntryInEntityRegister();
         }
+        
+        if (_authRequest.RequestorParty.NorwegianOrganizationNumber != null)
+        {
+            await ValidateRequestorHasValidEntryInEntityRegister();
+        }
 
         ValidateLanguageCodes();
-
-        var requirements = _evidenceCodesFromRequest.ToDictionary(es => es.EvidenceCodeName, es => es.AuthorizationRequirements);
-        if (authorizationRequest.FromEvidenceHarvester)
-        {
-            foreach (var requirement in requirements.Values)
-            {
-                requirement.RemoveAll(x => x.RequiredOnEvidenceHarvester == false);
-            }
-        }
 
         var authorizationErrors = await _requirementValidationService.ValidateRequirements(requirements, _authRequest);
         if (authorizationErrors.Count > 0)
@@ -183,22 +188,33 @@ public class AuthorizationRequestValidatorService : IAuthorizationRequestValidat
     /// Uses PartyParser on the supplied subject, and populates SubjectParty with it. Overwrites Requestor with norwegian identifier if applicable, else set to null
     /// </summary>
     /// <exception cref="InvalidSubjectException"></exception>
-    private void ValidateAndPopulateSubject()
+    private void ValidateAndPopulateSubject(bool customSubject)
     {
 
         if (_authRequest.Subject == null)
         {
             return;
         }
-
-        Party? party = PartyParser.GetPartyFromIdentifier(_authRequest.Subject, out string? error);
-        if (party == null)
+        
+        var party = PartyParser.GetPartyFromIdentifier(_authRequest.Subject, out var error);
+        if (party == null && !customSubject)
         {
             throw new InvalidSubjectException($"Invalid subject supplied: {error}");
         }
 
-        _authRequest.Subject = party.NorwegianOrganizationNumber ?? party.NorwegianSocialSecurityNumber;
-        _authRequest.SubjectParty = party;
+        if (party != null)
+        {
+            _authRequest.Subject = party.NorwegianOrganizationNumber ?? party.NorwegianSocialSecurityNumber;
+            _authRequest.SubjectParty = party;
+            return;
+        }
+
+        // Custom Subject Validation will be done later in RequirementValidationService
+        var customParty = new Party
+        {
+            Id = _authRequest.Subject
+        };
+        _authRequest.SubjectParty = customParty;
     }
 
     private void ValidateLegalBasisWellFormed()
@@ -306,6 +322,26 @@ public class AuthorizationRequestValidatorService : IAuthorizationRequestValidat
             throw new InvalidSubjectException("Subject (" + _authRequest.Subject + ") is deleted from the Central Coordinating Register for Legal Entities");
         }
     }
+    
+    private async Task ValidateRequestorHasValidEntryInEntityRegister()
+    {
+        if (_authRequest.Requestor == null)
+        {
+            throw new InvalidSubjectException("Requestor was not set");
+        }
+
+        var entity = await _entityRegistryService.Get(_authRequest.Requestor);
+
+        if (entity == null)
+        {
+            throw new InvalidSubjectException("Requestor (" + _authRequest.Requestor + ") was not found in the Central Coordinating Register for Legal Entities");
+        }
+
+        if (entity.IsDeleted)
+        {
+            throw new InvalidSubjectException("Requestor (" + _authRequest.Requestor + ") is deleted from the Central Coordinating Register for Legal Entities");
+        }
+    }
 
     private void ValidateEvidenceRequestWellFormed()
     {
@@ -333,8 +369,8 @@ public class AuthorizationRequestValidatorService : IAuthorizationRequestValidat
 
             if (!registeredEvidenceCode.IsValidServiceContext(_requestContextService.ServiceContext))
             {
-                _log.LogWarning("Request for '{evidenceCode}' from '{authenticatedOrg}' with subscription key '{subscriptionKey}' for product '{productid}', expected one of: {availableForProducts}",
-                    registeredEvidenceCode.EvidenceCodeName, _requestContextService.AuthenticatedOrgNumber, _requestContextService.SubscriptionKey, _requestContextService.ServiceContext.Name, string.Join(", ", registeredEvidenceCode.GetBelongsToServiceContexts()));
+                _log.LogWarning("Request for '{evidenceCode}' from '{authenticatedOrg}' for product '{productid}', expected one of: {availableForProducts}",
+                    registeredEvidenceCode.EvidenceCodeName, _requestContextService.AuthenticatedOrgNumber, _requestContextService.ServiceContext.Name, string.Join(", ", registeredEvidenceCode.GetBelongsToServiceContexts()));
 
                 throw new InvalidEvidenceRequestException(
                     $"The evidence code: {evidenceRequest.EvidenceCodeName} is not available for the supplied subscription key product '{_requestContextService.ServiceContext.Name}', expected one of: {string.Join(", ", registeredEvidenceCode.GetBelongsToServiceContexts())}.");

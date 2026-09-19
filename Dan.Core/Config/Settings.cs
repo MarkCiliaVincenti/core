@@ -12,6 +12,7 @@ public static class Settings
 {
     private static CoreKeyVault? _keyVault;
     private static X509Certificate2? _altinnCertificate;
+    private static X509Certificate2? _oedCertificate;
     private static string? _altinnApiKey;
     private static string? _altinnServiceOwnerApiKey;
     private static string? _cosmosDbConnection;
@@ -104,6 +105,11 @@ public static class Settings
             : _altinnCertificate ??= KeyVault.GetCertificate(KeyVaultSslCertificate).Result;
 
     /// <summary>
+    /// Altinn EC Certificate in base64
+    /// </summary>
+    public static X509Certificate2 OedMessagingCert => _oedCertificate ??= KeyVault.GetCertificateOedMessaging(KeyVaultSslCertificate).Result;
+
+    /// <summary>
     /// API-key for consent request / token
     /// </summary>
     public static string AltinnApiKey => 
@@ -168,12 +174,7 @@ public static class Settings
     /// SSL Certificate Thumbprint
     /// </summary>
     public static string KeyVaultSslCertificate => GetSetting("KeyVaultSslCertificate");
-
-    /// <summary>
-    /// Nadobe certificate header
-    /// </summary>
-    public static string CertificateHeader => "X-NADOBE-CERT";
-
+    
     /// <summary>
     /// Key Vault Name
     /// </summary>
@@ -315,6 +316,13 @@ public static class Settings
     public static string GetConsentStatusUrl(string authCode) =>string.Format(GetSetting("ConsentStatusURLPattern"), authCode);
 
     /// <summary>
+    /// Gets the consent status url for Altinn 3 consents (maskinporten)
+    /// </summary>
+    /// <param name="authCode">The authCode</param>
+    /// <returns>The url</returns>
+    public static string GetA3ConsentStatusUrl(string consentId) => string.Format(GetSetting("A3ConsentStatusURLPattern"), consentId);
+
+    /// <summary>
     /// The condition string to use as condition when creating SRR rights.
     /// </summary>
     public static string SrrRightsCondition => GetSetting("SrrRightsCondition");
@@ -353,11 +361,6 @@ public static class Settings
     public static string MaskinportenUrl => GetSetting("MaskinportenUrl");
 
     /// <summary>
-    /// Gets the Base URL to an auxiliary Maskinporten environment
-    /// </summary>
-    public static string MaskinportenAuxUrl => GetSetting("MaskinportenAuxUrl");
-
-    /// <summary>
     /// Gets setting for whether or not to use altinn servers in test mode (for profiling and problem solving)
     /// </summary>
     public static bool UseAltinnTestServers => bool.Parse(GetSetting("UseAltinnTestServers"));
@@ -369,16 +372,41 @@ public static class Settings
     /// </summary>
     public static string MaskinportenWellknownUrl => GetSetting("MaskinportenWellknownUrl");
 
-    /// <summary>
-    /// Gets the url to the wellknown endpoint for the auxiliary Maskinporten env
-    /// </summary>
-    public static string MaskinportenAuxWellknownUrl => GetSetting("MaskinportenAuxWellknownUrl");
-
     public static string AltinnWellknownUrl => GetSetting("AltinnWellknownUrl");
+    
+    /// <summary>
+    /// Gets the Url to use for CCR wrapper
+    /// </summary>
+    public static string CcrUrl => GetSetting("CcrUrl");
 
     public const int MaxReferenceLength = 50;
 
     public static int DefaultHarvestTaskCancellation = 35;
+    
+    public static string ApplicationInsightsResourceId => GetSetting("ApplicationInsightsResourceId");
+    public static string ApplicationInsightsCloudRoleName => GetSetting("ApplicationInsightsCloudRoleName");
+
+    public static string HashPepper => GetSetting("HashPepper");
+
+    public static string Altinn3ConsentUrl => GetSetting("Altinn3ConsentUrl");
+
+    /// <summary>
+    /// Base URL of the Altinn 3 Notifications API, e.g. https://platform.tt02.altinn.no/notifications/api/v1
+    /// </summary>
+    public static string NotificationsApiBaseUrl => GetSetting("NotificationsApiBaseUrl");
+
+    public static string AltinnMessageResource => "digdir-data-altinn-no-melding";
+
+    /// <summary>
+    /// Maskinporten scope used when creating notification orders, e.g. altinn:serviceowner/notifications.create
+    /// </summary>
+    public static string NotificationsCreateScope => "altinn:serviceowner/notifications.create";
+
+    /// <summary>
+    /// Altinn endpoint for exchanging a Maskinporten token for an Altinn token,
+    /// e.g. https://platform.tt02.altinn.no/authentication/api/v1/exchange/maskinporten
+    /// </summary>
+    public static string AltinnTokenExchangeUrl => GetSetting("AltinnTokenExchangeUrl");
 
     private static string GetSetting(string settingKey)
     {
